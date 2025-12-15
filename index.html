@@ -19,8 +19,6 @@
     .row-actions{display:flex;gap:8px;}
     .small{font-size:12px;color:#9aa;line-height:1.4}
     .card{border:1px solid #2a2a2a;border-radius:12px;padding:12px;background:#101010;margin-bottom:14px;}
-    .file{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    .file input{max-width:420px}
   </style>
 
   <!-- jsPDF (CDN) -->
@@ -32,13 +30,11 @@
 
   <div class="card">
     <div class="small">
-      第一次使用请先选择一个中文字体文件（推荐：NotoSansSC-Regular.ttf / .otf）。选择一次后，本页生成 PDF 都会用它，确保中文不乱码。<br/>
-      打印时建议：在打印对话框里选择 <b>缩放=100%</b> 或 <b>实际大小</b>，不要“适合页面”。
+      说明：本页面会自动加载中文字体（无需同事上传/安装）。<br/>
+      打印时建议：在打印对话框里选择 <b>缩放=100%</b> 或 <b>实际大小</b>，不要选“适合页面”，以确保 10×10cm 尺寸准确。
     </div>
-    <div class="file" style="margin-top:10px;">
-      <button class="btn" id="pickFontBtn">选择字体文件</button>
-      <span class="hint" id="fontStatus">未选择字体（可能会乱码）</span>
-      <input id="fontFile" type="file" accept=".ttf,.otf" style="display:none;" />
+    <div class="small" id="fontLoadStatus" style="margin-top:8px;color:#aab;">
+      字体状态：未加载（首次生成 PDF 时会自动下载并启用）
     </div>
   </div>
 
@@ -66,32 +62,32 @@
 
 <script>
   const tbody = document.getElementById('tbody');
+  const statusEl = document.getElementById('fontLoadStatus');
   const { jsPDF } = window.jspdf;
 
-  // ---- 字体加载（用户本地选择 ttf/otf，转换为 base64 注入 jsPDF）----
-  let fontBase64 = null;
-  let fontName = "CNFont";
+  // === 自动加载字体（一次缓存，多次复用）===
+  const FONT_URL = "./assets/fonts/NotoSansSC-Regular.ttf";
+  let cachedFontBase64 = null;
 
-  const fontFileInput = document.getElementById('fontFile');
-  const fontStatus = document.getElementById('fontStatus');
-  document.getElementById('pickFontBtn').onclick = () => fontFileInput.click();
-
-  fontFileInput.onchange = async () => {
-    const f = fontFileInput.files?.[0];
-    if (!f) return;
-    const buf = await f.arrayBuffer();
-    fontBase64 = arrayBufferToBase64(buf);
-    fontStatus.textContent = `已选择字体：${f.name}`;
-  };
-
-  function arrayBufferToBase64(buffer) {
+  async function loadFontBase64(url) {
+    const resp = await fetch(url, { cache: "force-cache" });
+    if (!resp.ok) throw new Error("Font download failed: " + resp.status);
+    const buf = await resp.arrayBuffer();
     let binary = '';
-    const bytes = new Uint8Array(buffer);
+    const bytes = new Uint8Array(buf);
     const chunkSize = 0x8000;
-    for (let i=0; i<bytes.length; i+=chunkSize) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunkSize));
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
     }
     return btoa(binary);
+  }
+
+  async function ensureFontLoaded() {
+    if (cachedFontBase64) return cachedFontBase64;
+    statusEl.textContent = "字体状态：正在加载…（首次可能稍等 1–3 秒）";
+    cachedFontBase64 = await loadFontBase64(FONT_URL);
+    statusEl.textContent = "字体状态：已加载（中文 PDF 正常）";
+    return cachedFontBase64;
   }
 
   // ---- 表格行 ----
@@ -182,7 +178,7 @@
       // 下划线
       doc.line(lineX1, y + 1.2, lineX2, y + 1.2);
 
-      // 预填内容（如果你希望“只留线不打印文字”，把这段注释掉）
+      // 预填内容（如果你希望“只留线不打印文字”，把这行注释掉）
       if (val) doc.text(String(val), lineX1 + 2, y);
 
       y += gap;
@@ -193,26 +189,26 @@
     const rows = [...tbody.querySelectorAll('tr')];
     if (rows.length === 0) { alert('请先新增至少一张标签'); return; }
 
-    // 初始化 PDF：单位 mm，页面 100x100
-    const doc = new jsPDF({ unit: 'mm', format: [100, 100] });
+    try {
+      // 初始化 PDF：单位 mm，页面 100x100
+      const doc = new jsPDF({ unit: 'mm', format: [100, 100] });
 
-    // 注入中文字体（推荐必须选）
-    if (fontBase64) {
-      // 注意：ttf/otf 都可尝试按 ttf 加载，大多数都兼容
+      // 自动加载并启用中文字体（同事无需任何操作）
+      const fontBase64 = await ensureFontLoaded();
       doc.addFileToVFS("CNFont.ttf", fontBase64);
-      doc.addFont("CNFont.ttf", fontName, "normal");
-      doc.setFont(fontName, "normal");
-    } else {
-      // 没选字体也能生成，但中文可能乱码
-      doc.setFont("helvetica", "normal");
+      doc.addFont("CNFont.ttf", "CNFont", "normal");
+      doc.setFont("CNFont", "normal");
+
+      rows.forEach((tr, idx) => {
+        if (idx > 0) doc.addPage([100,100], 'portrait');
+        drawLabel(doc, getRowData(tr));
+      });
+
+      doc.save("labels.pdf");
+    } catch (e) {
+      console.error(e);
+      alert("生成失败：可能是字体未能下载成功。\n请检查仓库是否存在 assets/fonts/NotoSansSC-Regular.ttf，然后刷新页面重试。");
     }
-
-    rows.forEach((tr, idx) => {
-      if (idx > 0) doc.addPage([100,100], 'portrait');
-      drawLabel(doc, getRowData(tr));
-    });
-
-    doc.save("labels.pdf");
   };
 
   // 默认 1 行
