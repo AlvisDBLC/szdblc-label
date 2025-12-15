@@ -231,30 +231,51 @@ async function apiDelete(path) {
   }
 
   document.getElementById('makePdf').onclick = async () => {
-    const rows = [...tbody.querySelectorAll('tr')];
-    if (rows.length === 0) { alert('请先新增至少一张标签'); return; }
+  const rows = [...tbody.querySelectorAll('tr')];
+  if (rows.length === 0) {
+    alert('请先新增至少一张标签');
+    return;
+  }
 
-    try {
-      // 初始化 PDF：单位 mm，页面 100x100
-      const doc = new jsPDF({ unit: 'mm', format: [100, 100] });
+  // === 1. 先生成 PDF（最高优先级） ===
+  let items;
+  try {
+    const doc = new jsPDF({ unit: 'mm', format: [100, 100] });
 
-      // 自动加载并启用中文字体（同事无需任何操作）
-      const fontBase64 = await ensureFontLoaded();
-      doc.addFileToVFS("CNFont.ttf", fontBase64);
-      doc.addFont("CNFont.ttf", "CNFont", "normal");
-      doc.setFont("CNFont", "normal");
+    const fontBase64 = await ensureFontLoaded();
+    doc.addFileToVFS("CNFont.ttf", fontBase64);
+    doc.addFont("CNFont.ttf", "CNFont", "normal");
+    doc.setFont("CNFont", "normal");
 
-      rows.forEach((tr, idx) => {
-        if (idx > 0) doc.addPage([100,100], 'portrait');
-        drawLabel(doc, getRowData(tr));
-      });
+    items = rows.map(tr => getRowData(tr));
 
-      doc.save("labels.pdf");
-    } catch (e) {
-      console.error(e);
-      alert("生成失败：可能是字体未能下载成功。\n请检查仓库是否存在 assets/fonts/NotoSansSC-Regular.ttf，然后刷新页面重试。");
-    }
-  };
+    items.forEach((data, idx) => {
+      if (idx > 0) doc.addPage([100, 100], 'portrait');
+      drawLabel(doc, data);
+    });
+
+    doc.save("labels.pdf");
+  } catch (e) {
+    console.error(e);
+    alert("生成 PDF 失败（可能是字体或浏览器问题），请刷新页面后重试。");
+    return; // PDF 都失败了，直接结束
+  }
+
+  // === 2. 再尝试保存共享历史（失败不影响打印） ===
+  try {
+    await apiPost("/labels", { items });
+  } catch (e) {
+    console.warn("保存共享历史失败：", e);
+    alert(
+      "PDF 已成功生成。\n\n但【共享历史保存失败】（可能是写入口令未输入或网络问题）。\n" +
+      "不影响本次打印，下次可刷新后重试保存。"
+    );
+  }
+
+  // 刷新历史列表（不强制）
+  refreshHistory().catch(() => {});
+};
+
 
   // 默认 1 行
   newRow();
@@ -385,6 +406,7 @@ refreshHistory().catch(()=>{});
 </script>
 </body>
 </html>
+
 
 
 
