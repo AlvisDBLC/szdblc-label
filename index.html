@@ -28,15 +28,18 @@
 <div class="wrap">
   <h1>川丞物料标签生成（10×10cm / 内容 7×7cm / 多页 PDF）</h1>
 
-  <div class="card">
-    <div class="small">
-      说明：本页面会自动加载中文字体（无需同事上传/安装）。<br/>
-      打印时建议：在打印对话框里选择 <b>缩放=100%</b> 或 <b>实际大小</b>，不要选“适合页面”，以确保 10×10cm 尺寸准确。
+    <div class="card">
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <b style="font-size:13px;">共享历史</b>
+      <input id="hisQ" placeholder="搜索 物料编码/名称" style="max-width:280px;">
+      <button class="btn" id="hisRefresh">刷新</button>
+      <button class="btn" id="hisSaveNew">保存为新记录</button>
+      <button class="btn" id="hisSaveOverwrite" disabled>覆盖保存</button>
+      <span class="hint" id="hisTip">未加载任何历史记录</span>
     </div>
-    <div class="small" id="fontLoadStatus" style="margin-top:8px;color:#aab;">
-      字体状态：未加载（首次生成 PDF 时会自动下载并启用）
-    </div>
+    <div id="hisList" style="margin-top:10px; display:flex; flex-direction:column; gap:8px;"></div>
   </div>
+
 
   <div class="top-actions">
     <button class="btn" id="addRow">新增一张标签</button>
@@ -64,6 +67,48 @@
   const tbody = document.getElementById('tbody');
   const statusEl = document.getElementById('fontLoadStatus');
   const { jsPDF } = window.jspdf;
+
+  // ===== 共享历史（Workers + D1）配置 =====
+const API_BASE = "https://label-api.alvis-8fc.workers.dev";
+let loadedLabelId = null; // 当前加载的历史记录ID（用于覆盖保存）
+
+function getWriteKey() {
+  // 不把口令写死在源码里：每个同事首次保存时输入一次即可
+  const k = localStorage.getItem("label_write_key");
+  if (k) return k;
+  const input = prompt("请输入写入口令（仅首次需要）：");
+  if (!input) return null;
+  localStorage.setItem("label_write_key", input.trim());
+  return input.trim();
+}
+
+async function apiGet(path) {
+  const r = await fetch(`${API_BASE}${path}`);
+  if (!r.ok) throw new Error(`GET ${path} failed`);
+  return r.json();
+}
+async function apiPost(path, body) {
+  const key = getWriteKey();
+  if (!key) throw new Error("no_write_key");
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Write-Key": key },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`POST ${path} failed`);
+  return r.json();
+}
+async function apiDelete(path) {
+  const key = getWriteKey();
+  if (!key) throw new Error("no_write_key");
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: { "X-Write-Key": key },
+  });
+  if (!r.ok) throw new Error(`DELETE ${path} failed`);
+  return r.json();
+}
+
 
   // === 自动加载字体（一次缓存，多次复用）===
   const FONT_URL = "./assets/fonts/NotoSansSC-Regular.ttf";
@@ -213,9 +258,134 @@
 
   // 默认 1 行
   newRow();
+  // ===== 共享历史 UI =====
+const hisQ = document.getElementById("hisQ");
+const hisRefresh = document.getElementById("hisRefresh");
+const hisSaveNew = document.getElementById("hisSaveNew");
+const hisSaveOverwrite = document.getElementById("hisSaveOverwrite");
+const hisList = document.getElementById("hisList");
+const hisTip = document.getElementById("hisTip");
+
+function setTip(text) {
+  hisTip.textContent = text;
+}
+
+function collectCurrentItems() {
+  const trs = [...tbody.querySelectorAll("tr")];
+  return trs.map(tr => getRowData(tr));
+}
+
+function replaceTableWithItems(items) {
+  tbody.innerHTML = "";
+  items.forEach(it => newRow(it));
+  if (items.length === 0) newRow();
+}
+
+function makeHisRow(item) {
+  const div = document.createElement("div");
+  div.style.border = "1px solid #2a2a2a";
+  div.style.borderRadius = "10px";
+  div.style.padding = "10px";
+  div.style.background = "#0f0f0f";
+  div.style.display = "flex";
+  div.style.justifyContent = "space-between";
+  div.style.alignItems = "center";
+  div.style.gap = "10px";
+
+  const left = document.createElement("div");
+  left.innerHTML = `
+    <div style="font-size:13px; font-weight:650;">
+      ${escapeHtml(item.material_code || "(无编码)")} — ${escapeHtml(item.material_name || "(无名称)")}
+    </div>
+    <div class="hint">更新时间：${escapeHtml(item.updated_at || "")}</div>
+  `;
+
+  const right = document.createElement("div");
+  right.style.display = "flex";
+  right.style.gap = "8px";
+
+  const btnLoad = document.createElement("button");
+  btnLoad.className = "btn";
+  btnLoad.textContent = "加载";
+  btnLoad.onclick = async () => {
+    const data = await apiGet(`/labels/${item.id}`);
+    loadedLabelId = data.label.id;
+    replaceTableWithItems(data.items || []);
+    hisSaveOverwrite.disabled = false;
+    setTip(`已加载记录：${loadedLabelId}（可覆盖保存）`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const btnDel = document.createElement("button");
+  btnDel.className = "btn";
+  btnDel.textContent = "删除";
+  btnDel.onclick = async () => {
+    if (!confirm("确定删除这条共享历史记录？")) return;
+    await apiDelete(`/labels/${item.id}`);
+    if (loadedLabelId === item.id) {
+      loadedLabelId = null;
+      hisSaveOverwrite.disabled = true;
+      setTip("已删除当前加载的记录");
+    }
+    await refreshHistory();
+  };
+
+  right.appendChild(btnLoad);
+  right.appendChild(btnDel);
+
+  div.appendChild(left);
+  div.appendChild(right);
+  return div;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, m => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[m]));
+}
+
+async function refreshHistory() {
+  const q = (hisQ.value || "").trim();
+  const data = await apiGet(`/labels?limit=50${q ? `&q=${encodeURIComponent(q)}` : ""}`);
+  hisList.innerHTML = "";
+  (data.items || []).forEach(it => hisList.appendChild(makeHisRow(it)));
+  if ((data.items || []).length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "暂无共享历史记录";
+    hisList.appendChild(empty);
+  }
+}
+
+hisRefresh.onclick = refreshHistory;
+hisQ.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") refreshHistory();
+});
+
+hisSaveNew.onclick = async () => {
+  const items = collectCurrentItems();
+  await apiPost("/labels", { items }); // 不传 id => 新记录
+  loadedLabelId = null;
+  hisSaveOverwrite.disabled = true;
+  setTip("已保存为新记录");
+  await refreshHistory();
+};
+
+hisSaveOverwrite.onclick = async () => {
+  if (!loadedLabelId) return;
+  const items = collectCurrentItems();
+  await apiPost("/labels", { id: loadedLabelId, items }); // 传 id => 覆盖
+  setTip(`已覆盖保存：${loadedLabelId}`);
+  await refreshHistory();
+};
+
+// 页面打开先拉一次共享历史
+refreshHistory().catch(()=>{});
+
 </script>
 </body>
 </html>
+
 
 
 
