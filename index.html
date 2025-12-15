@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>川丞物料标签生成</title>
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC","Microsoft YaHei",Arial; padding:24px; background:#0b0b0b; color:#eaeaea;}
+    .wrap{max-width:1100px;margin:0 auto;}
+    h1{font-size:18px;margin:0 0 14px;font-weight:650;}
+    .top-actions{display:flex;gap:10px;align-items:center;margin:12px 0 14px;flex-wrap:wrap;}
+    .btn{cursor:pointer;border:1px solid #444;background:#151515;color:#fff;padding:10px 12px;border-radius:10px;}
+    .btn:hover{border-color:#666;}
+    .hint{color:#9aa;font-size:12px}
+    table{width:100%;border-collapse:collapse;background:#121212;border:1px solid #2a2a2a;border-radius:12px;overflow:hidden;}
+    th,td{border-bottom:1px solid #222;padding:10px;vertical-align:top;}
+    th{font-weight:600;text-align:left;color:#bbb;font-size:12px;}
+    input{width:100%;box-sizing:border-box;border:1px solid #333;background:#0f0f0f;color:#fff;padding:8px 10px;border-radius:10px;}
+    .row-actions{display:flex;gap:8px;}
+    .small{font-size:12px;color:#9aa;line-height:1.4}
+    .card{border:1px solid #2a2a2a;border-radius:12px;padding:12px;background:#101010;margin-bottom:14px;}
+    .file{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .file input{max-width:420px}
+  </style>
+
+  <!-- jsPDF (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <h1>川丞物料标签生成（10×10cm / 内容 7×7cm / 多页 PDF）</h1>
+
+  <div class="card">
+    <div class="small">
+      第一次使用请先选择一个中文字体文件（推荐：NotoSansSC-Regular.ttf / .otf）。选择一次后，本页生成 PDF 都会用它，确保中文不乱码。<br/>
+      打印时建议：在打印对话框里选择 <b>缩放=100%</b> 或 <b>实际大小</b>，不要“适合页面”。
+    </div>
+    <div class="file" style="margin-top:10px;">
+      <button class="btn" id="pickFontBtn">选择字体文件</button>
+      <span class="hint" id="fontStatus">未选择字体（可能会乱码）</span>
+      <input id="fontFile" type="file" accept=".ttf,.otf" style="display:none;" />
+    </div>
+  </div>
+
+  <div class="top-actions">
+    <button class="btn" id="addRow">新增一张标签</button>
+    <button class="btn" id="makePdf">生成 PDF 并下载</button>
+    <span class="hint">可一次生成几十张，下载仍然只有一个 PDF（多页）。</span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width:14%">物料编码</th>
+        <th style="width:22%">物料名称</th>
+        <th style="width:10%">数量</th>
+        <th style="width:14%">订单编码</th>
+        <th style="width:14%">送货日期</th>
+        <th style="width:12%">包装数量</th>
+        <th style="width:14%">操作</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script>
+  const tbody = document.getElementById('tbody');
+  const { jsPDF } = window.jspdf;
+
+  // ---- 字体加载（用户本地选择 ttf/otf，转换为 base64 注入 jsPDF）----
+  let fontBase64 = null;
+  let fontName = "CNFont";
+
+  const fontFileInput = document.getElementById('fontFile');
+  const fontStatus = document.getElementById('fontStatus');
+  document.getElementById('pickFontBtn').onclick = () => fontFileInput.click();
+
+  fontFileInput.onchange = async () => {
+    const f = fontFileInput.files?.[0];
+    if (!f) return;
+    const buf = await f.arrayBuffer();
+    fontBase64 = arrayBufferToBase64(buf);
+    fontStatus.textContent = `已选择字体：${f.name}`;
+  };
+
+  function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    for (let i=0; i<bytes.length; i+=chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  // ---- 表格行 ----
+  function newRow(prefill = {}) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input placeholder="手填" value="${prefill.material_code || ''}"></td>
+      <td><input placeholder="手填" value="${prefill.material_name || ''}"></td>
+      <td><input placeholder="手填" value="${prefill.qty || ''}"></td>
+      <td><input placeholder="手填" value="${prefill.order_code || ''}"></td>
+      <td><input placeholder="手填" value="${prefill.deliver_date || ''}"></td>
+      <td><input placeholder="手填" value="${prefill.pack_qty || ''}"></td>
+      <td>
+        <div class="row-actions">
+          <button class="btn" data-act="dup">复制</button>
+          <button class="btn" data-act="del">删除</button>
+        </div>
+      </td>
+    `;
+    tr.addEventListener('click', (e) => {
+      const act = e.target?.getAttribute?.('data-act');
+      if (!act) return;
+      if (act === 'del') tr.remove();
+      if (act === 'dup') newRow(getRowData(tr));
+    });
+    tbody.appendChild(tr);
+  }
+
+  function getRowData(tr) {
+    const inputs = tr.querySelectorAll('input');
+    return {
+      material_code: inputs[0].value.trim(),
+      material_name: inputs[1].value.trim(),
+      qty: inputs[2].value.trim(),
+      order_code: inputs[3].value.trim(),
+      deliver_date: inputs[4].value.trim(),
+      pack_qty: inputs[5].value.trim(),
+    };
+  }
+
+  document.getElementById('addRow').onclick = () => newRow();
+
+  // ---- 画一页标签：10x10cm(=100x100mm)；内容框7x7cm(=70x70mm) ----
+  function drawLabel(doc, data) {
+    const pageW = 100, pageH = 100;      // mm
+    const boxW = 70, boxH = 70;          // mm
+    const left = (pageW - boxW) / 2;
+    const top = (pageH - boxH) / 2;
+
+    // 灰底
+    doc.setFillColor(190,190,190);
+    doc.rect(left, top, boxW, boxH, 'F');
+
+    // 黑框
+    doc.setDrawColor(0,0,0);
+    doc.setLineWidth(0.8);
+    doc.rect(left, top, boxW, boxH, 'S');
+
+    // 标题
+    doc.setFontSize(18);
+    doc.text("川丞物料", pageW/2, top + 10, { align: "center" });
+
+    // 字段
+    doc.setFontSize(12);
+    const rows = [
+      ["物料编码", data.material_code || ""],
+      ["物料名称", data.material_name || ""],
+      ["数    量", data.qty || ""],
+      ["订单编码", data.order_code || ""],
+      ["送货日期", data.deliver_date || ""],
+      ["包装数量", data.pack_qty || ""],
+    ];
+
+    const labelX = left + 4;
+    const colonX = left + 22;
+    const lineX1 = left + 28;
+    const lineX2 = left + boxW - 4;
+
+    let y = top + 20;
+    const gap = 9;
+
+    doc.setLineWidth(0.5);
+
+    for (const [lab, val] of rows) {
+      doc.text(lab, labelX, y);
+      doc.text("：", colonX, y);
+
+      // 下划线
+      doc.line(lineX1, y + 1.2, lineX2, y + 1.2);
+
+      // 预填内容（如果你希望“只留线不打印文字”，把这段注释掉）
+      if (val) doc.text(String(val), lineX1 + 2, y);
+
+      y += gap;
+    }
+  }
+
+  document.getElementById('makePdf').onclick = async () => {
+    const rows = [...tbody.querySelectorAll('tr')];
+    if (rows.length === 0) { alert('请先新增至少一张标签'); return; }
+
+    // 初始化 PDF：单位 mm，页面 100x100
+    const doc = new jsPDF({ unit: 'mm', format: [100, 100] });
+
+    // 注入中文字体（推荐必须选）
+    if (fontBase64) {
+      // 注意：ttf/otf 都可尝试按 ttf 加载，大多数都兼容
+      doc.addFileToVFS("CNFont.ttf", fontBase64);
+      doc.addFont("CNFont.ttf", fontName, "normal");
+      doc.setFont(fontName, "normal");
+    } else {
+      // 没选字体也能生成，但中文可能乱码
+      doc.setFont("helvetica", "normal");
+    }
+
+    rows.forEach((tr, idx) => {
+      if (idx > 0) doc.addPage([100,100], 'portrait');
+      drawLabel(doc, getRowData(tr));
+    });
+
+    doc.save("labels.pdf");
+  };
+
+  // 默认 1 行
+  newRow();
+</script>
+</body>
+</html>
